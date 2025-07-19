@@ -1,0 +1,22 @@
+# IRCCloud credentials (can also be set via environment variables)
+email: "${IRCCLOUD_EMAIL}"
+password: "${IRCCLOUD_PASSWORD}"
+
+# Channels to monitor (optional - if not specified, monitors all channels)
+channels:
+  - "#channel1"
+  - "#channel2"
+
+# Channels to ignore (optional)
+ignored_channels:
+  - "#spam"
+  - "#bot-logs"
+
+# Database file path
+database_path: "messages.db"
+
+# Where to write daily summaries
+summary_output_path: "/path/to/summary.txt"
+
+# When to generate summaries (cron format: minute hour day month weekday)
+summary_time: "0 6 * * *" # 6 AM daily
