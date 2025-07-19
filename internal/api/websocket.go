@@ -25,6 +25,7 @@ type IRCCloudClient struct {
 	db                *storage.DB
 	lastSeenEID       int64
 	session           string
+	apiHost           string
 	channels          []string
 	ignoredChannels   []string
 	channelSet        map[string]bool
@@ -95,8 +96,9 @@ func (c *IRCCloudClient) Connect(email, password string) error {
 		return fmt.Errorf("could not authenticate: %w", err)
 	}
 
-	// Store the session for later use
+	// Store the session and API host for later use
 	c.session = authResp.Session
+	c.apiHost = authResp.APIHost
 
 	// Step 2: Connect to the WebSocket API.
 	log.Println("🌐 Step 3: Connecting to WebSocket...")
@@ -187,6 +189,7 @@ func (c *IRCCloudClient) Run(channels []string, ignoredChannels []string) {
 					log.Println("unmarshal oob error:", err)
 					continue
 				}
+				log.Printf("🔍 Received oob_include with URL: %s", oob.URL)
 				if err := c.processBacklog(oob.URL); err != nil {
 					log.Println("error processing backlog:", err)
 				}
@@ -371,10 +374,18 @@ func (c *IRCCloudClient) buildWebSocketURL(authResp *AuthResponse) string {
 }
 
 func (c *IRCCloudClient) processBacklog(backlogURL string) error {
-	// The backlog URL is just a path, we need to prepend the base URL
+	// The backlog URL is just a path, we need to prepend the correct API host
 	if !strings.HasPrefix(backlogURL, "http") {
-		backlogURL = "https://www.irccloud.com" + backlogURL
+		if c.apiHost != "" {
+			// APIHost already includes the protocol (https://)
+			backlogURL = c.apiHost + backlogURL
+		} else {
+			// Fallback to www.irccloud.com if no API host is available
+			backlogURL = "https://www.irccloud.com" + backlogURL
+		}
 	}
+
+	log.Printf("🔍 Requesting backlog from URL: %s", backlogURL)
 
 	req, err := http.NewRequest("GET", backlogURL, nil)
 	if err != nil {
