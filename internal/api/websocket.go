@@ -3,23 +3,55 @@ package api
 import (
 	"bytes"
 	"compress/gzip"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"time"
 
+	"irccloud-watcher/internal/config"
 	"irccloud-watcher/internal/storage"
 	"irccloud-watcher/internal/utils"
 
 	"github.com/gorilla/websocket"
 )
+
+// ConnectionState represents the current state of the WebSocket connection
+type ConnectionState int
+
+const (
+	StateDisconnected ConnectionState = iota
+	StateConnecting
+	StateConnected
+	StateReconnecting
+	StateError
+)
+
+func (s ConnectionState) String() string {
+	switch s {
+	case StateDisconnected:
+		return "disconnected"
+	case StateConnecting:
+		return "connecting"
+	case StateConnected:
+		return "connected"
+	case StateReconnecting:
+		return "reconnecting"
+	case StateError:
+		return "error"
+	default:
+		return "unknown"
+	}
+}
 
 // IRCCloudClient is a client for the IRCCloud API.
 type IRCCloudClient struct {
@@ -32,13 +64,53 @@ type IRCCloudClient struct {
 	ignoredChannels   []string
 	channelSet        map[string]bool
 	ignoredChannelSet map[string]bool
+
+	// Connection management
+	connConfig      *config.ConnectionConfig
+	state           ConnectionState
+	stateMutex      sync.RWMutex
+	retryCount      int
+	lastConnectTime time.Time
+	ctx             context.Context
+	cancelFunc      context.CancelFunc
+
+	// Authentication cache
+	authResp *AuthResponse
+	email    string
+	password string
 }
 
 // NewIRCCloudClient creates a new IRCCloudClient.
 func NewIRCCloudClient(db *storage.DB) *IRCCloudClient {
+	ctx, cancel := context.WithCancel(context.Background())
 	return &IRCCloudClient{
-		db: db,
+		db:         db,
+		state:      StateDisconnected,
+		ctx:        ctx,
+		cancelFunc: cancel,
 	}
+}
+
+// setState safely updates the connection state
+func (c *IRCCloudClient) setState(state ConnectionState) {
+	c.stateMutex.Lock()
+	defer c.stateMutex.Unlock()
+	if c.state != state {
+		log.Printf("🔄 Connection state: %s -> %s", c.state, state)
+		c.state = state
+	}
+}
+
+// getState safely reads the connection state
+func (c *IRCCloudClient) getState() ConnectionState {
+	c.stateMutex.RLock()
+	defer c.stateMutex.RUnlock()
+	return c.state
+}
+
+// setConnectionConfig sets the connection configuration
+func (c *IRCCloudClient) setConnectionConfig(cfg *config.ConnectionConfig) {
+	c.connConfig = cfg
 }
 
 // AuthResponse is the response from the IRCCloud authentication endpoint.
@@ -90,36 +162,93 @@ type OOBInclude struct {
 	URL string `json:"url"`
 }
 
-// Connect connects to the IRCCloud WebSocket API.
+// Connect connects to the IRCCloud WebSocket API with retry logic.
 func (c *IRCCloudClient) Connect(email, password string) error {
-	// Step 1: Authenticate and get authentication response.
-	authResp, err := c.authenticate(email, password)
-	if err != nil {
-		return fmt.Errorf("could not authenticate: %w", err)
+	// Store credentials for reconnection
+	c.email = email
+	c.password = password
+
+	return c.connectWithRetry()
+}
+
+// connectWithRetry implements exponential backoff retry logic
+func (c *IRCCloudClient) connectWithRetry() error {
+	c.retryCount = 0
+
+	for c.retryCount < c.connConfig.MaxRetryAttempts {
+		if c.ctx.Err() != nil {
+			return fmt.Errorf("connection cancelled")
+		}
+
+		if c.retryCount > 0 {
+			c.setState(StateReconnecting)
+			delay := c.calculateBackoffDelay()
+			log.Printf("🔄 Retry attempt %d/%d in %v", c.retryCount+1, c.connConfig.MaxRetryAttempts, delay)
+
+			select {
+			case <-time.After(delay):
+			case <-c.ctx.Done():
+				return fmt.Errorf("connection cancelled during retry")
+			}
+		} else {
+			c.setState(StateConnecting)
+		}
+
+		err := c.attemptConnection()
+		if err == nil {
+			c.setState(StateConnected)
+			c.retryCount = 0
+			c.lastConnectTime = time.Now()
+			log.Println("✅ WebSocket connection established!")
+			return nil
+		}
+
+		log.Printf("❌ Connection attempt failed: %v", err)
+		c.retryCount++
+
+		if c.retryCount >= c.connConfig.MaxRetryAttempts {
+			c.setState(StateError)
+			return fmt.Errorf("failed to connect after %d attempts: %w", c.connConfig.MaxRetryAttempts, err)
+		}
 	}
 
-	// Store the session and API host for later use
-	c.session = authResp.Session
-	c.apiHost = authResp.APIHost
+	return fmt.Errorf("connection failed")
+}
 
-	// Step 2: Connect to the WebSocket API.
-	log.Println("🌐 Step 3: Connecting to WebSocket...")
-	// Build dynamic WebSocket URL from authentication response
-	wsURL := c.buildWebSocketURL(authResp)
+// attemptConnection tries to establish a single connection
+func (c *IRCCloudClient) attemptConnection() error {
+	// Step 1: Authenticate if we don't have a cached auth response or it's stale
+	if c.authResp == nil || time.Since(c.lastConnectTime) > 30*time.Minute {
+		log.Println("🔐 Authenticating...")
+		authResp, err := c.authenticate(c.email, c.password)
+		if err != nil {
+			return fmt.Errorf("authentication failed: %w", err)
+		}
+		c.authResp = authResp
+		c.session = authResp.Session
+		c.apiHost = authResp.APIHost
+	}
+
+	// Step 2: Connect to the WebSocket API
+	log.Println("🌐 Connecting to WebSocket...")
+	wsURL := c.buildWebSocketURL(c.authResp)
 	log.Printf("🌐 WebSocket URL: %s", wsURL)
 
 	header := http.Header{}
 	header.Add("Origin", "https://www.irccloud.com")
 	header.Add("User-Agent", "irccloud-watcher/0.1.0")
-	header.Add("Cookie", "session="+authResp.Session) // Manually add the session cookie
+	header.Add("Cookie", "session="+c.authResp.Session)
 
-	log.Printf("🌐 WebSocket headers: %v", header)
-	log.Printf("🌐 Session key length: %d", len(authResp.Session))
+	// Parse connection timeout
+	timeout, err := time.ParseDuration(c.connConfig.ConnectionTimeout)
+	if err != nil {
+		timeout = 45 * time.Second
+	}
 
 	dialer := &websocket.Dialer{
 		Proxy:             http.ProxyFromEnvironment,
-		HandshakeTimeout:  45 * time.Second,
-		EnableCompression: true, // Enable compression as suggested in docs
+		HandshakeTimeout:  timeout,
+		EnableCompression: true,
 	}
 
 	conn, resp, err := dialer.Dial(wsURL, header)
@@ -129,30 +258,63 @@ func (c *IRCCloudClient) Connect(email, password string) error {
 			if location := resp.Header.Get("Location"); location != "" {
 				log.Printf("❌ Redirect location: %s", location)
 			}
-			log.Printf("❌ Response headers: %v", resp.Header)
 			errorBody, readErr := io.ReadAll(resp.Body)
-			if readErr == nil {
+			if readErr == nil && len(errorBody) < 500 {
 				log.Printf("❌ WebSocket response body: %s", string(errorBody))
 			}
 		}
-		return fmt.Errorf("could not connect to websocket: %w", err)
+		return fmt.Errorf("websocket dial failed: %w", err)
 	}
-	c.conn = conn
 
-	log.Println("✅ WebSocket connection established!")
-	return nil
-}
-
-// Close closes the WebSocket connection.
-func (c *IRCCloudClient) Close() {
+	// Close any existing connection
 	if c.conn != nil {
 		c.conn.Close()
 	}
+
+	c.conn = conn
+	return nil
 }
 
-// Run starts the client and listens for messages.
-func (c *IRCCloudClient) Run(channels, ignoredChannels []string) {
-	// Store filtering parameters in the client
+// calculateBackoffDelay calculates the delay for exponential backoff
+func (c *IRCCloudClient) calculateBackoffDelay() time.Duration {
+	initialDelay, err := time.ParseDuration(c.connConfig.InitialRetryDelay)
+	if err != nil {
+		initialDelay = time.Second
+	}
+
+	maxDelay, err := time.ParseDuration(c.connConfig.MaxRetryDelay)
+	if err != nil {
+		maxDelay = 5 * time.Minute
+	}
+
+	// Calculate exponential backoff: initial * (multiplier ^ retryCount)
+	delay := time.Duration(float64(initialDelay) * math.Pow(c.connConfig.BackoffMultiplier, float64(c.retryCount)))
+
+	// Cap at maximum delay
+	if delay > maxDelay {
+		delay = maxDelay
+	}
+
+	return delay
+}
+
+// Close closes the WebSocket connection and cancels reconnection attempts.
+func (c *IRCCloudClient) Close() {
+	c.setState(StateDisconnected)
+	c.cancelFunc() // Cancel any ongoing operations
+
+	if c.conn != nil {
+		if err := c.conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, "")); err != nil {
+			log.Printf("⚠️ Error writing close message: %v", err)
+		}
+		c.conn.Close()
+		c.conn = nil
+	}
+}
+
+// Run starts the client and listens for messages with automatic reconnection.
+func (c *IRCCloudClient) Run(channels, ignoredChannels []string, connConfig *config.ConnectionConfig) {
+	// Store filtering parameters and connection config
 	c.channels = channels
 	c.ignoredChannels = ignoredChannels
 	c.channelSet = make(map[string]bool)
@@ -163,83 +325,186 @@ func (c *IRCCloudClient) Run(channels, ignoredChannels []string) {
 	for _, ch := range ignoredChannels {
 		c.ignoredChannelSet[ch] = true
 	}
+	c.setConnectionConfig(connConfig)
 
 	interrupt := make(chan os.Signal, 1)
 	signal.Notify(interrupt, os.Interrupt)
 
-	ticker := time.NewTicker(30 * time.Second)
-	defer ticker.Stop()
+	// Main loop with reconnection handling
+	for {
+		select {
+		case <-interrupt:
+			log.Println("🛑 Interrupt received, shutting down...")
+			c.Close()
+			return
+		case <-c.ctx.Done():
+			log.Println("🛑 Context cancelled, shutting down...")
+			return
+		default:
+			switch {
+			case c.getState() == StateConnected && c.conn != nil:
+				// Run the message loop until connection fails
+				if err := c.runMessageLoop(); err != nil {
+					log.Printf("❌ Message loop error: %v", err)
+					c.setState(StateError)
 
+					// Close broken connection
+					if c.conn != nil {
+						c.conn.Close()
+						c.conn = nil
+					}
+
+					// Attempt reconnection
+					log.Println("🔄 Attempting to reconnect...")
+					if reconnectErr := c.connectWithRetry(); reconnectErr != nil {
+						log.Printf("❌ Reconnection failed: %v", reconnectErr)
+						if c.retryCount >= c.connConfig.MaxRetryAttempts {
+							log.Println("❌ Max retry attempts reached, exiting...")
+							return
+						}
+					}
+				}
+			case c.getState() == StateDisconnected:
+				// Connection was closed externally
+				return
+			default:
+				// Wait a bit before checking again
+				time.Sleep(time.Second)
+			}
+		}
+	}
+}
+
+// runMessageLoop handles the WebSocket message processing with ping/pong monitoring
+func (c *IRCCloudClient) runMessageLoop() error {
+	// Parse intervals from config
+	heartbeatInterval, err := time.ParseDuration(c.connConfig.HeartbeatInterval)
+	if err != nil {
+		heartbeatInterval = 30 * time.Second
+	}
+
+	pingInterval, err := time.ParseDuration(c.connConfig.PingInterval)
+	if err != nil {
+		pingInterval = 60 * time.Second
+	}
+
+	heartbeatTicker := time.NewTicker(heartbeatInterval)
+	defer heartbeatTicker.Stop()
+
+	pingTicker := time.NewTicker(pingInterval)
+	defer pingTicker.Stop()
+
+	// Set up ping/pong handlers
+	c.conn.SetPongHandler(func(string) error {
+		log.Println("🏓 Received pong")
+		return nil
+	})
+
+	// Message reading goroutine
+	done := make(chan error, 1)
 	go func() {
+		defer close(done)
 		for {
 			_, message, err := c.conn.ReadMessage()
 			if err != nil {
-				log.Println("read error:", err)
-				// TODO: Implement reconnection logic
+				done <- fmt.Errorf("read error: %w", err)
 				return
 			}
 
-			var ircMsg IRCMessage
-			if err := json.Unmarshal(message, &ircMsg); err != nil {
-				log.Println("unmarshal error:", err)
-				continue
-			}
-
-			if ircMsg.Type == "oob_include" {
-				var oob OOBInclude
-				if err := json.Unmarshal(message, &oob); err != nil {
-					log.Println("unmarshal oob error:", err)
-					continue
-				}
-				log.Printf("🔍 Received oob_include with URL: %s", oob.URL)
-				if err := c.processBacklog(oob.URL); err != nil {
-					log.Println("error processing backlog:", err)
-				}
-				continue
-			}
-
-			// Accept message if not ignored and either no channels specified (accept all) or channel is in allowed list
-			if ircMsg.Type == "buffer_msg" && !c.ignoredChannelSet[ircMsg.Chan] && (len(c.channels) == 0 || c.channelSet[ircMsg.Chan]) {
-				cleanedMsg := utils.CleanIRCMessage(ircMsg.Msg)
-				log.Printf("Received message in %s from %s: %s", ircMsg.Chan, ircMsg.From, cleanedMsg)
-
-				msgTime := time.Unix(0, ircMsg.Time*1000)
-
-				dbMsg := &storage.Message{
-					Channel:      ircMsg.Chan,
-					Timestamp:    msgTime,
-					Sender:       ircMsg.From,
-					Message:      cleanedMsg,
-					Date:         msgTime.Format("2006-01-02"),
-					IRCCloudTime: ircMsg.Time,
-				}
-
-				if err := c.db.InsertMessage(dbMsg); err != nil {
-					log.Printf("Error inserting message into DB: %v", err)
-				}
-				c.lastSeenEID = ircMsg.Time
+			if err := c.processMessage(message); err != nil {
+				log.Printf("⚠️ Error processing message: %v", err)
+				// Continue processing other messages
 			}
 		}
 	}()
 
+	// Main event loop
 	for {
 		select {
-		case <-ticker.C:
-			// Send a heartbeat to keep the connection alive and report the last seen EID
-			heartbeat := map[string]interface{}{"_method": "heartbeat", "_reqid": time.Now().Unix(), "last_seen_eid": c.lastSeenEID}
-			if err := c.conn.WriteJSON(heartbeat); err != nil {
-				log.Println("heartbeat error:", err)
+		case <-c.ctx.Done():
+			return fmt.Errorf("context cancelled")
+		case err := <-done:
+			return err
+		case <-heartbeatTicker.C:
+			if err := c.sendHeartbeat(); err != nil {
+				return fmt.Errorf("heartbeat failed: %w", err)
 			}
-		case <-interrupt:
-			log.Println("interrupt received, closing connection")
-			err := c.conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
-			if err != nil {
-				log.Println("write close:", err)
+		case <-pingTicker.C:
+			if err := c.sendPing(); err != nil {
+				return fmt.Errorf("ping failed: %w", err)
 			}
-			time.Sleep(time.Second)
-			return
 		}
 	}
+}
+
+// processMessage handles individual WebSocket messages
+func (c *IRCCloudClient) processMessage(message []byte) error {
+	var ircMsg IRCMessage
+	if err := json.Unmarshal(message, &ircMsg); err != nil {
+		return fmt.Errorf("unmarshal error: %w", err)
+	}
+
+	if ircMsg.Type == "oob_include" {
+		var oob OOBInclude
+		if err := json.Unmarshal(message, &oob); err != nil {
+			return fmt.Errorf("unmarshal oob error: %w", err)
+		}
+		log.Printf("🔍 Received oob_include with URL: %s", oob.URL)
+		if err := c.processBacklog(oob.URL); err != nil {
+			log.Printf("⚠️ Error processing backlog: %v", err)
+		}
+		return nil
+	}
+
+	// Accept message if not ignored and either no channels specified (accept all) or channel is in allowed list
+	if ircMsg.Type == "buffer_msg" && !c.ignoredChannelSet[ircMsg.Chan] && (len(c.channels) == 0 || c.channelSet[ircMsg.Chan]) {
+		cleanedMsg := utils.CleanIRCMessage(ircMsg.Msg)
+		log.Printf("📨 Message in %s from %s: %s", ircMsg.Chan, ircMsg.From, cleanedMsg)
+
+		msgTime := time.Unix(0, ircMsg.Time*1000)
+
+		dbMsg := &storage.Message{
+			Channel:      ircMsg.Chan,
+			Timestamp:    msgTime,
+			Sender:       ircMsg.From,
+			Message:      cleanedMsg,
+			Date:         msgTime.Format("2006-01-02"),
+			IRCCloudTime: ircMsg.Time,
+		}
+
+		if err := c.db.InsertMessage(dbMsg); err != nil {
+			return fmt.Errorf("error inserting message into DB: %w", err)
+		}
+		c.lastSeenEID = ircMsg.Time
+	}
+
+	return nil
+}
+
+// sendHeartbeat sends a heartbeat message to keep the connection alive
+func (c *IRCCloudClient) sendHeartbeat() error {
+	heartbeat := map[string]interface{}{
+		"_method":       "heartbeat",
+		"_reqid":        time.Now().Unix(),
+		"last_seen_eid": c.lastSeenEID,
+	}
+
+	if err := c.conn.WriteJSON(heartbeat); err != nil {
+		return fmt.Errorf("failed to send heartbeat: %w", err)
+	}
+
+	log.Println("💓 Heartbeat sent")
+	return nil
+}
+
+// sendPing sends a WebSocket ping frame
+func (c *IRCCloudClient) sendPing() error {
+	if err := c.conn.WriteMessage(websocket.PingMessage, []byte("ping")); err != nil {
+		return fmt.Errorf("failed to send ping: %w", err)
+	}
+
+	log.Println("🏓 Ping sent")
+	return nil
 }
 
 // authenticate authenticates with the IRCCloud API and returns the full authentication response.
@@ -461,9 +726,9 @@ func (c *IRCCloudClient) processBacklog(backlogURL string) error {
 }
 
 // debugLogRequest logs HTTP request details when debug mode is enabled
-func debugLogRequest(method, url string, headers http.Header) {
+func debugLogRequest(method, requestURL string, headers http.Header) {
 	if os.Getenv("IRCCLOUD_DEBUG") == "true" {
-		log.Printf("🔍 %s %s", method, url)
+		log.Printf("🔍 %s %s", method, requestURL)
 		for key, values := range headers {
 			if !isSensitiveHeader(key) {
 				log.Printf("🔍   %s: %s", key, strings.Join(values, ", "))

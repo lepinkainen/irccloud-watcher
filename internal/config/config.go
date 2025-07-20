@@ -10,13 +10,25 @@ import (
 // Config stores the application configuration.
 // It is loaded from a YAML file.
 type Config struct {
-	Email             string   `mapstructure:"email"`
-	Password          string   `mapstructure:"password"`
-	Channels          []string `mapstructure:"channels"`
-	IgnoredChannels   []string `mapstructure:"ignored_channels"`
-	DatabasePath      string   `mapstructure:"database_path"`
-	SummaryOutputPath string   `mapstructure:"summary_output_path"`
-	SummaryTime       string   `mapstructure:"summary_time"`
+	Email             string           `mapstructure:"email"`
+	Password          string           `mapstructure:"password"`
+	Channels          []string         `mapstructure:"channels"`
+	IgnoredChannels   []string         `mapstructure:"ignored_channels"`
+	DatabasePath      string           `mapstructure:"database_path"`
+	SummaryOutputPath string           `mapstructure:"summary_output_path"`
+	SummaryTime       string           `mapstructure:"summary_time"`
+	Connection        ConnectionConfig `mapstructure:"connection"`
+}
+
+// ConnectionConfig stores WebSocket connection parameters.
+type ConnectionConfig struct {
+	HeartbeatInterval string  `mapstructure:"heartbeat_interval"`
+	MaxRetryAttempts  int     `mapstructure:"max_retry_attempts"`
+	InitialRetryDelay string  `mapstructure:"initial_retry_delay"`
+	MaxRetryDelay     string  `mapstructure:"max_retry_delay"`
+	BackoffMultiplier float64 `mapstructure:"backoff_multiplier"`
+	ConnectionTimeout string  `mapstructure:"connection_timeout"`
+	PingInterval      string  `mapstructure:"ping_interval"`
 }
 
 // LoadConfig loads the configuration from the given path.
@@ -42,6 +54,9 @@ func LoadConfig(path string) (*Config, error) {
 	if password := os.Getenv("IRCCLOUD_PASSWORD"); password != "" {
 		c.Password = password
 	}
+
+	// Set default connection values if not specified
+	setConnectionDefaults(&c.Connection)
 
 	// Validate required fields
 	if err := c.Validate(); err != nil {
@@ -69,4 +84,29 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("summary_time is required (cron expression)")
 	}
 	return nil
+}
+
+// setConnectionDefaults sets default values for connection configuration
+func setConnectionDefaults(c *ConnectionConfig) {
+	if c.HeartbeatInterval == "" {
+		c.HeartbeatInterval = "30s"
+	}
+	if c.MaxRetryAttempts == 0 {
+		c.MaxRetryAttempts = 10
+	}
+	if c.InitialRetryDelay == "" {
+		c.InitialRetryDelay = "1s"
+	}
+	if c.MaxRetryDelay == "" {
+		c.MaxRetryDelay = "5m"
+	}
+	if c.BackoffMultiplier == 0 {
+		c.BackoffMultiplier = 2.0
+	}
+	if c.ConnectionTimeout == "" {
+		c.ConnectionTimeout = "45s"
+	}
+	if c.PingInterval == "" {
+		c.PingInterval = "60s"
+	}
 }

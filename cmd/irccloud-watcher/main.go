@@ -82,7 +82,7 @@ func main() {
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 
 	// Run the client in a goroutine
-	go client.Run(cfg.Channels, cfg.IgnoredChannels)
+	go client.Run(cfg.Channels, cfg.IgnoredChannels, &cfg.Connection)
 
 	// Wait for shutdown signal
 	<-quit

@@ -7,6 +7,10 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
+
+	"irccloud-watcher/internal/config"
+	"irccloud-watcher/internal/storage"
 )
 
 // Test data
@@ -283,5 +287,190 @@ func TestMalformedJSONHandling(t *testing.T) {
 
 	if !strings.Contains(err.Error(), "could not parse response") {
 		t.Errorf("Expected parse error message, got: %v", err)
+	}
+}
+
+// Test connection state management
+func TestConnectionState(t *testing.T) {
+	client := NewIRCCloudClient(nil)
+
+	// Test initial state
+	if client.getState() != StateDisconnected {
+		t.Errorf("Expected initial state to be StateDisconnected, got %s", client.getState())
+	}
+
+	// Test state transitions
+	client.setState(StateConnecting)
+	if client.getState() != StateConnecting {
+		t.Errorf("Expected state to be StateConnecting, got %s", client.getState())
+	}
+
+	client.setState(StateConnected)
+	if client.getState() != StateConnected {
+		t.Errorf("Expected state to be StateConnected, got %s", client.getState())
+	}
+
+	client.setState(StateReconnecting)
+	if client.getState() != StateReconnecting {
+		t.Errorf("Expected state to be StateReconnecting, got %s", client.getState())
+	}
+
+	client.setState(StateError)
+	if client.getState() != StateError {
+		t.Errorf("Expected state to be StateError, got %s", client.getState())
+	}
+}
+
+// Test connection state string representation
+func TestConnectionStateString(t *testing.T) {
+	tests := []struct {
+		state    ConnectionState
+		expected string
+	}{
+		{StateDisconnected, "disconnected"},
+		{StateConnecting, "connecting"},
+		{StateConnected, "connected"},
+		{StateReconnecting, "reconnecting"},
+		{StateError, "error"},
+		{ConnectionState(999), "unknown"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.expected, func(t *testing.T) {
+			if tt.state.String() != tt.expected {
+				t.Errorf("Expected %s, got %s", tt.expected, tt.state.String())
+			}
+		})
+	}
+}
+
+// Test exponential backoff calculation
+func TestCalculateBackoffDelay(t *testing.T) {
+	client := NewIRCCloudClient(nil)
+	client.setConnectionConfig(&config.ConnectionConfig{
+		InitialRetryDelay: "1s",
+		MaxRetryDelay:     "30s",
+		BackoffMultiplier: 2.0,
+	})
+
+	tests := []struct {
+		retryCount    int
+		expectedDelay time.Duration
+	}{
+		{0, 1 * time.Second},
+		{1, 2 * time.Second},
+		{2, 4 * time.Second},
+		{3, 8 * time.Second},
+		{4, 16 * time.Second},
+		{5, 30 * time.Second},  // Capped at max delay
+		{10, 30 * time.Second}, // Still capped at max delay
+	}
+
+	for _, tt := range tests {
+		t.Run(string(rune(tt.retryCount+'0')), func(t *testing.T) {
+			client.retryCount = tt.retryCount
+			delay := client.calculateBackoffDelay()
+			if delay != tt.expectedDelay {
+				t.Errorf("For retry count %d, expected delay %v, got %v", tt.retryCount, tt.expectedDelay, delay)
+			}
+		})
+	}
+}
+
+// Test backoff with invalid config values
+func TestCalculateBackoffDelayWithInvalidConfig(t *testing.T) {
+	client := NewIRCCloudClient(nil)
+	client.setConnectionConfig(&config.ConnectionConfig{
+		InitialRetryDelay: "invalid",
+		MaxRetryDelay:     "invalid",
+		BackoffMultiplier: 2.0,
+	})
+	client.retryCount = 1
+
+	// Should use fallback values when config is invalid
+	delay := client.calculateBackoffDelay()
+	expectedDelay := 2 * time.Second // 1s * 2^1 (using fallback initial delay)
+	if delay != expectedDelay {
+		t.Errorf("Expected fallback delay %v, got %v", expectedDelay, delay)
+	}
+}
+
+// Test connection configuration defaults
+func TestConnectionConfigDefaults(t *testing.T) {
+	connConfig := &config.ConnectionConfig{
+		HeartbeatInterval: "30s",
+		MaxRetryAttempts:  10,
+		InitialRetryDelay: "1s",
+		MaxRetryDelay:     "5m",
+		BackoffMultiplier: 2.0,
+		ConnectionTimeout: "45s",
+		PingInterval:      "60s",
+	}
+
+	// For now, test that the config struct exists and can be used
+	client := NewIRCCloudClient(nil)
+	client.setConnectionConfig(connConfig)
+
+	// Test that the client doesn't panic with empty config
+	if client.connConfig == nil {
+		t.Error("Connection config should not be nil after setting")
+	}
+
+	// Test that config values are properly set
+	if client.connConfig.MaxRetryAttempts != 10 {
+		t.Errorf("Expected MaxRetryAttempts to be 10, got %d", client.connConfig.MaxRetryAttempts)
+	}
+
+	if client.connConfig.BackoffMultiplier != 2.0 {
+		t.Errorf("Expected BackoffMultiplier to be 2.0, got %f", client.connConfig.BackoffMultiplier)
+	}
+}
+
+// Test message processing
+func TestProcessMessage(t *testing.T) {
+	// Create a temporary database for testing
+	db, err := storage.NewDB(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to create test database: %v", err)
+	}
+	defer db.Close()
+
+	client := NewIRCCloudClient(db)
+	client.channelSet = map[string]bool{"#test": true}
+	client.ignoredChannelSet = map[string]bool{"#ignored": true}
+
+	// Test valid buffer message
+	validMessage := `{
+		"type": "buffer_msg",
+		"chan": "#test",
+		"from": "testuser",
+		"msg": "Hello world",
+		"time": 1634567890000000
+	}`
+
+	err = client.processMessage([]byte(validMessage))
+	if err != nil {
+		t.Errorf("Failed to process valid message: %v", err)
+	}
+
+	// Test ignored channel message
+	ignoredMessage := `{
+		"type": "buffer_msg",
+		"chan": "#ignored",
+		"from": "testuser",
+		"msg": "This should be ignored",
+		"time": 1634567890000000
+	}`
+
+	err = client.processMessage([]byte(ignoredMessage))
+	if err != nil {
+		t.Errorf("Failed to process ignored message: %v", err)
+	}
+
+	// Test invalid JSON
+	invalidMessage := `{"invalid": json}`
+	err = client.processMessage([]byte(invalidMessage))
+	if err == nil {
+		t.Error("Expected error when processing invalid JSON")
 	}
 }

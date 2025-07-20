@@ -61,7 +61,7 @@ func (db *DB) InsertMessage(m *Message) error {
 	INSERT OR IGNORE INTO messages (channel, timestamp, sender, message, date, irccloud_time)
 	VALUES (:channel, :timestamp, :sender, :message, :date, :irccloud_time)
 	`
-	_, err := db.NamedExec(query, m)
+	_, err := db.DB.NamedExec(query, m)
 	return err
 }
 
@@ -72,7 +72,7 @@ func (db *DB) GetMessagesByDate(date string) ([]Message, error) {
 	SELECT * FROM messages
 	WHERE date = ?
 	`
-	err := db.Select(&messages, query, date)
+	err := db.DB.Select(&messages, query, date)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -85,6 +85,6 @@ func (db *DB) DeleteMessagesByDate(date string) error {
 	DELETE FROM messages
 	WHERE date = ?
 	`
-	_, err := db.Exec(query, date)
+	_, err := db.DB.Exec(query, date)
 	return err
 }
