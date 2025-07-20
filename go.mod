@@ -2,8 +2,6 @@ module irccloud-watcher
 
 go 1.23.0
 
-toolchain go1.24.5
-
 require (
 	github.com/alecthomas/kong v1.12.0
 	github.com/gorilla/websocket v1.5.3
