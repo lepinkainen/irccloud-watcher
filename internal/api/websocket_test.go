@@ -347,7 +347,7 @@ func TestConnectionStateString(t *testing.T) {
 // Test exponential backoff calculation
 func TestCalculateBackoffDelay(t *testing.T) {
 	client := NewIRCCloudClient(nil)
-	client.setConnectionConfig(&config.ConnectionConfig{
+	client.SetConnectionConfig(&config.ConnectionConfig{
 		InitialRetryDelay: "1s",
 		MaxRetryDelay:     "30s",
 		BackoffMultiplier: 2.0,
@@ -380,7 +380,7 @@ func TestCalculateBackoffDelay(t *testing.T) {
 // Test backoff with invalid config values
 func TestCalculateBackoffDelayWithInvalidConfig(t *testing.T) {
 	client := NewIRCCloudClient(nil)
-	client.setConnectionConfig(&config.ConnectionConfig{
+	client.SetConnectionConfig(&config.ConnectionConfig{
 		InitialRetryDelay: "invalid",
 		MaxRetryDelay:     "invalid",
 		BackoffMultiplier: 2.0,
@@ -409,7 +409,7 @@ func TestConnectionConfigDefaults(t *testing.T) {
 
 	// For now, test that the config struct exists and can be used
 	client := NewIRCCloudClient(nil)
-	client.setConnectionConfig(connConfig)
+	client.SetConnectionConfig(connConfig)
 
 	// Test that the client doesn't panic with empty config
 	if client.connConfig == nil {

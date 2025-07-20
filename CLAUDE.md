@@ -112,3 +112,8 @@ IRCCLOUD_EMAIL=your@email.com IRCCLOUD_PASSWORD=yourpass ./build/irccloud-watche
 - Copy `config.yaml.example` to `config.yaml` and customize
 - Set `IRCCLOUD_EMAIL` and `IRCCLOUD_PASSWORD` environment variables
 - Ensure channels, database_path, and summary paths are configured
+
+## Memories
+
+### Project Safety
+- **DO NOT TOUCH config.yaml** - critical configuration file that must not be modified directly

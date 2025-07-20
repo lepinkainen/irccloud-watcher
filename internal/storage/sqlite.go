@@ -48,8 +48,12 @@ func createSchema(db *sqlx.DB) error {
 		sender TEXT,
 		message TEXT,
 		date DATE NOT NULL,
-		irccloud_time INTEGER UNIQUE
+		irccloud_time INTEGER
 	);
+	
+	CREATE INDEX IF NOT EXISTS idx_messages_irccloud_time ON messages(irccloud_time);
+	CREATE INDEX IF NOT EXISTS idx_messages_date ON messages(date);
+	CREATE INDEX IF NOT EXISTS idx_messages_channel ON messages(channel);
 	`
 	_, err := db.Exec(schema)
 	return err
@@ -57,9 +61,19 @@ func createSchema(db *sqlx.DB) error {
 
 // InsertMessage inserts a new message into the database.
 func (db *DB) InsertMessage(m *Message) error {
+	// Use INSERT OR REPLACE to handle duplicates based on multiple criteria
+	// This ensures we don't get true duplicates while allowing multiple messages with irccloud_time=0
 	query := `
-	INSERT OR IGNORE INTO messages (channel, timestamp, sender, message, date, irccloud_time)
-	VALUES (:channel, :timestamp, :sender, :message, :date, :irccloud_time)
+	INSERT INTO messages (channel, timestamp, sender, message, date, irccloud_time)
+	SELECT :channel, :timestamp, :sender, :message, :date, :irccloud_time
+	WHERE NOT EXISTS (
+		SELECT 1 FROM messages 
+		WHERE channel = :channel 
+		AND sender = :sender 
+		AND message = :message 
+		AND datetime(timestamp) = datetime(:timestamp)
+		AND irccloud_time = :irccloud_time
+	)
 	`
 	_, err := db.DB.NamedExec(query, m)
 	return err

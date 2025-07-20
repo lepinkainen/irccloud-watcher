@@ -108,8 +108,8 @@ func (c *IRCCloudClient) getState() ConnectionState {
 	return c.state
 }
 
-// setConnectionConfig sets the connection configuration
-func (c *IRCCloudClient) setConnectionConfig(cfg *config.ConnectionConfig) {
+// SetConnectionConfig sets the connection configuration
+func (c *IRCCloudClient) SetConnectionConfig(cfg *config.ConnectionConfig) {
 	c.connConfig = cfg
 }
 
@@ -143,18 +143,18 @@ func (e *AuthError) Error() string {
 
 // IRCMessage represents a message from the IRCCloud WebSocket.
 type IRCMessage struct {
-	Type     string                 `json:"type"`
-	Chan     string                 `json:"chan"`
-	From     string                 `json:"from"`
-	Msg      string                 `json:"msg"`
-	Time     int64                  `json:"time"`
-	EID      int64                  `json:"eid"`
-	BID      int                    `json:"bid"`
-	Server   string                 `json:"server"`
-	Nick     string                 `json:"nick"`
-	Hostmask string                 `json:"hostmask"`
-	Ops      map[string]interface{} `json:"ops"`
-	Self     bool                   `json:"self"`
+	Type     string         `json:"type"`
+	Chan     string         `json:"chan"`
+	From     string         `json:"from"`
+	Msg      string         `json:"msg"`
+	Time     int64          `json:"time"`
+	EID      int64          `json:"eid"`
+	BID      int            `json:"bid"`
+	Server   string         `json:"server"`
+	Nick     string         `json:"nick"`
+	Hostmask string         `json:"hostmask"`
+	Ops      map[string]any `json:"ops"`
+	Self     bool           `json:"self"`
 }
 
 // OOBInclude is a message that contains a URL to the backlog.
@@ -291,9 +291,7 @@ func (c *IRCCloudClient) calculateBackoffDelay() time.Duration {
 	delay := time.Duration(float64(initialDelay) * math.Pow(c.connConfig.BackoffMultiplier, float64(c.retryCount)))
 
 	// Cap at maximum delay
-	if delay > maxDelay {
-		delay = maxDelay
-	}
+	delay = min(delay, maxDelay)
 
 	return delay
 }
@@ -325,7 +323,6 @@ func (c *IRCCloudClient) Run(channels, ignoredChannels []string, connConfig *con
 	for _, ch := range ignoredChannels {
 		c.ignoredChannelSet[ch] = true
 	}
-	c.setConnectionConfig(connConfig)
 
 	interrupt := make(chan os.Signal, 1)
 	signal.Notify(interrupt, os.Interrupt)
@@ -396,7 +393,9 @@ func (c *IRCCloudClient) runMessageLoop() error {
 
 	// Set up ping/pong handlers
 	c.conn.SetPongHandler(func(string) error {
-		log.Println("🏓 Received pong")
+		if os.Getenv("IRCCLOUD_DEBUG") == "true" {
+			log.Println("🏓 Received pong")
+		}
 		return nil
 	})
 
@@ -459,9 +458,26 @@ func (c *IRCCloudClient) processMessage(message []byte) error {
 	// Accept message if not ignored and either no channels specified (accept all) or channel is in allowed list
 	if ircMsg.Type == "buffer_msg" && !c.ignoredChannelSet[ircMsg.Chan] && (len(c.channels) == 0 || c.channelSet[ircMsg.Chan]) {
 		cleanedMsg := utils.CleanIRCMessage(ircMsg.Msg)
-		log.Printf("📨 Message in %s from %s: %s", ircMsg.Chan, ircMsg.From, cleanedMsg)
 
-		msgTime := time.Unix(0, ircMsg.Time*1000)
+		// Handle timestamp conversion - IRCCloud uses microseconds since Unix epoch
+		// Live messages often have timestamp 0, so we use current time as fallback
+		var msgTime time.Time
+		if ircMsg.Time > 0 {
+			// Convert from microseconds to seconds and nanoseconds
+			seconds := ircMsg.Time / 1000000
+			microseconds := ircMsg.Time % 1000000
+			nanoseconds := microseconds * 1000
+			msgTime = time.Unix(seconds, nanoseconds)
+		} else {
+			// Use current time for live messages (timestamp 0 is normal)
+			msgTime = time.Now()
+		}
+
+		if os.Getenv("IRCCLOUD_DEBUG") == "true" {
+			log.Printf("🔍 Processing message: Channel=%s, From=%s, Time=%d, Converted=%s", ircMsg.Chan, ircMsg.From, ircMsg.Time, msgTime.Format(time.RFC3339))
+		}
+
+		log.Printf("%s <%s> %s", ircMsg.Chan, ircMsg.From, cleanedMsg)
 
 		dbMsg := &storage.Message{
 			Channel:      ircMsg.Chan,
@@ -473,9 +489,23 @@ func (c *IRCCloudClient) processMessage(message []byte) error {
 		}
 
 		if err := c.db.InsertMessage(dbMsg); err != nil {
+			log.Printf("❌ Error inserting message into DB: %v", err)
 			return fmt.Errorf("error inserting message into DB: %w", err)
 		}
-		c.lastSeenEID = ircMsg.Time
+
+		if os.Getenv("IRCCLOUD_DEBUG") == "true" {
+			log.Printf("✅ Message stored successfully: ID will be auto-generated")
+		}
+
+		// Fix: Use EID instead of Time for lastSeenEID tracking
+		if ircMsg.EID > c.lastSeenEID {
+			c.lastSeenEID = ircMsg.EID
+		}
+	} else if os.Getenv("IRCCLOUD_DEBUG") == "true" {
+		// Debug why message was filtered out
+		log.Printf("🚫 Message filtered: Type=%s, Channel=%s, Ignored=%t, ChannelAllowed=%t",
+			ircMsg.Type, ircMsg.Chan, c.ignoredChannelSet[ircMsg.Chan],
+			(len(c.channels) == 0 || c.channelSet[ircMsg.Chan]))
 	}
 
 	return nil
@@ -483,7 +513,7 @@ func (c *IRCCloudClient) processMessage(message []byte) error {
 
 // sendHeartbeat sends a heartbeat message to keep the connection alive
 func (c *IRCCloudClient) sendHeartbeat() error {
-	heartbeat := map[string]interface{}{
+	heartbeat := map[string]any{
 		"_method":       "heartbeat",
 		"_reqid":        time.Now().Unix(),
 		"last_seen_eid": c.lastSeenEID,
@@ -493,7 +523,9 @@ func (c *IRCCloudClient) sendHeartbeat() error {
 		return fmt.Errorf("failed to send heartbeat: %w", err)
 	}
 
-	log.Println("💓 Heartbeat sent")
+	if os.Getenv("IRCCLOUD_DEBUG") == "true" {
+		log.Println("💓 Heartbeat sent")
+	}
 	return nil
 }
 
@@ -503,7 +535,9 @@ func (c *IRCCloudClient) sendPing() error {
 		return fmt.Errorf("failed to send ping: %w", err)
 	}
 
-	log.Println("🏓 Ping sent")
+	if os.Getenv("IRCCLOUD_DEBUG") == "true" {
+		log.Println("🏓 Ping sent")
+	}
 	return nil
 }
 
@@ -703,9 +737,25 @@ func (c *IRCCloudClient) processBacklog(backlogURL string) error {
 		}
 
 		cleanedMsg := utils.CleanIRCMessage(ircMsg.Msg)
-		log.Printf("Received backlog message in %s from %s: %s", ircMsg.Chan, ircMsg.From, cleanedMsg)
+		// Handle timestamp conversion - IRCCloud uses microseconds since Unix epoch
+		// Live messages often have timestamp 0, so we use current time as fallback
+		var msgTime time.Time
+		if ircMsg.Time > 0 {
+			// Convert from microseconds to seconds and nanoseconds
+			seconds := ircMsg.Time / 1000000
+			microseconds := ircMsg.Time % 1000000
+			nanoseconds := microseconds * 1000
+			msgTime = time.Unix(seconds, nanoseconds)
+		} else {
+			// Use current time for live messages (timestamp 0 is normal)
+			msgTime = time.Now()
+		}
 
-		msgTime := time.Unix(0, ircMsg.Time*1000)
+		if os.Getenv("IRCCLOUD_DEBUG") == "true" {
+			log.Printf("🔍 Processing backlog message: Channel=%s, From=%s, Time=%d, Converted=%s", ircMsg.Chan, ircMsg.From, ircMsg.Time, msgTime.Format(time.RFC3339))
+		}
+
+		log.Printf("%s <%s> %s", ircMsg.Chan, ircMsg.From, cleanedMsg)
 
 		dbMsg := &storage.Message{
 			Channel:      ircMsg.Chan,
@@ -717,7 +767,9 @@ func (c *IRCCloudClient) processBacklog(backlogURL string) error {
 		}
 
 		if err := c.db.InsertMessage(dbMsg); err != nil {
-			log.Printf("Error inserting backlog message into DB: %v", err)
+			log.Printf("❌ Error inserting backlog message into DB: %v", err)
+		} else if os.Getenv("IRCCLOUD_DEBUG") == "true" {
+			log.Printf("✅ Backlog message stored successfully")
 		}
 	}
 

@@ -47,6 +47,7 @@ func main() {
 	defer db.Close()
 
 	client := api.NewIRCCloudClient(db)
+	client.SetConnectionConfig(&cfg.Connection)
 	if connectErr := client.Connect(cfg.Email, cfg.Password); connectErr != nil {
 		log.Fatalf("Failed to connect to IRCCloud: %v", connectErr)
 	}
