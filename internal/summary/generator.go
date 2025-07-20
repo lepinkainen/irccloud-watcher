@@ -10,15 +10,15 @@ import (
 )
 
 // SummaryGenerator generates daily summaries of IRC messages.
-type SummaryGenerator struct{}
+type Generator struct{}
 
 // NewSummaryGenerator creates a new SummaryGenerator.
-func NewSummaryGenerator() *SummaryGenerator {
-	return &SummaryGenerator{}
+func NewSummaryGenerator() *Generator {
+	return &Generator{}
 }
 
 // GenerateDailySummary generates a summary of messages from the previous day.
-func (g *SummaryGenerator) GenerateDailySummary(db *storage.DB, outputPath string) error {
+func (g *Generator) GenerateDailySummary(db *storage.DB, outputPath string) error {
 	yesterday := time.Now().AddDate(0, 0, -1).Format("2006-01-02")
 
 	messages, err := db.GetMessagesByDate(yesterday)
@@ -33,7 +33,7 @@ func (g *SummaryGenerator) GenerateDailySummary(db *storage.DB, outputPath strin
 
 	summary := formatSummary(messages)
 
-	err = os.WriteFile(outputPath, []byte(summary), 0644)
+	err = os.WriteFile(outputPath, []byte(summary), 0o644)
 	if err != nil {
 		return fmt.Errorf("could not write summary to file %s: %w", outputPath, err)
 	}

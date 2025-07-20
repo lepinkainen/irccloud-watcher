@@ -1,25 +1,30 @@
 package main
 
 import (
-	"flag"
 	"log"
 	"os"
 	"os/signal"
 	"syscall"
 
-	"github.com/robfig/cron/v3"
 	"irccloud-watcher/internal/api"
 	"irccloud-watcher/internal/config"
 	"irccloud-watcher/internal/storage"
 	"irccloud-watcher/internal/summary"
+
+	"github.com/alecthomas/kong"
+	"github.com/robfig/cron/v3"
 )
 
-func main() {
-	configPath := flag.String("config", "config.yaml", "Path to the configuration file")
-	generateSummary := flag.Bool("generate-summary", false, "Generate a summary and exit")
-	flag.Parse()
+type CLI struct {
+	Config          string `help:"Path to the configuration file" default:"config.yaml"`
+	GenerateSummary bool   `help:"Generate a summary and exit"`
+}
 
-	cfg, err := config.LoadConfig(*configPath)
+func main() {
+	var cli CLI
+	kong.Parse(&cli)
+
+	cfg, err := config.LoadConfig(cli.Config)
 	if err != nil {
 		log.Fatalf("Failed to load configuration: %v", err)
 	}
@@ -28,27 +33,30 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to open database: %v", err)
 	}
-	defer db.Close()
 
-	if *generateSummary {
+	if cli.GenerateSummary {
 		summaryGenerator := summary.NewSummaryGenerator()
-		if err := summaryGenerator.GenerateDailySummary(db, cfg.SummaryOutputPath); err != nil {
-			log.Fatalf("Failed to generate summary: %v", err)
+		if summaryErr := summaryGenerator.GenerateDailySummary(db, cfg.SummaryOutputPath); summaryErr != nil {
+			db.Close()
+			log.Fatalf("Failed to generate summary: %v", summaryErr)
 		}
+		db.Close()
 		os.Exit(0)
 	}
 
+	defer db.Close()
+
 	client := api.NewIRCCloudClient(db)
-	if err := client.Connect(cfg.Email, cfg.Password); err != nil {
-		log.Fatalf("Failed to connect to IRCCloud: %v", err)
+	if connectErr := client.Connect(cfg.Email, cfg.Password); connectErr != nil {
+		log.Fatalf("Failed to connect to IRCCloud: %v", connectErr)
 	}
 	defer client.Close()
 
 	c := cron.New()
 	_, err = c.AddFunc(cfg.SummaryTime, func() {
 		summaryGenerator := summary.NewSummaryGenerator()
-		if err := summaryGenerator.GenerateDailySummary(db, cfg.SummaryOutputPath); err != nil {
-			log.Printf("Failed to generate summary: %v", err)
+		if cronErr := summaryGenerator.GenerateDailySummary(db, cfg.SummaryOutputPath); cronErr != nil {
+			log.Printf("Failed to generate summary: %v", cronErr)
 		}
 	})
 	if err != nil {

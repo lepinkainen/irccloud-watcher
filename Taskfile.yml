@@ -1,5 +1,3 @@
-# Example Taskfile.yml following project tech stack guidelines
-# See: https://taskfile.dev/
 version: '3'
 
 vars:
@@ -14,8 +12,6 @@ tasks:
     deps: [test, lint]
     cmds:
       - task: build-go
-      # - task: build-python  # Uncomment for Python projects
-      # - task: build-js      # Uncomment for JS/TS projects
 
   # Linux-specific build
   build-linux:
@@ -39,23 +35,17 @@ tasks:
     desc: Run tests
     cmds:
       - task: test-go
-      # - task: test-python  # Uncomment for Python projects
-      # - task: test-js      # Uncomment for JS/TS projects
 
   test-ci:
     desc: Run tests with coverage for CI
     cmds:
       - task: test-go-ci
-      # - task: test-python-ci  # Uncomment for Python projects
-      # - task: test-js-ci      # Uncomment for JS/TS projects
 
   # Linting tasks
   lint:
     desc: Lint code
     cmds:
       - task: lint-go
-      # - task: lint-python  # Uncomment for Python projects
-      # - task: lint-js      # Uncomment for JS/TS projects
 
   # Clean build artifacts
   clean:
@@ -64,15 +54,13 @@ tasks:
       - rm -rf {{.BUILD_DIR}}
       - mkdir -p {{.BUILD_DIR}}
 
-  # Language-specific tasks
-
-  # Go tasks
+  # Go-specific tasks
   build-go:
     desc: Build Go project
     cmds:
-      - gofmt -w .
+      - gofmt -w -s -e .
       - mkdir -p {{.BUILD_DIR}}
-      - go build -o {{.BUILD_DIR}}/{{.PROJECT_NAME}} ./cmd/irccloud-watcher/main.go
+      - go build -o {{.BUILD_DIR}}/{{.PROJECT_NAME}} ./cmd/irccloud-watcher
 
   test-go:
     desc: Run Go tests
@@ -89,109 +77,10 @@ tasks:
     cmds:
       - go fmt ./...
       - go vet ./...
-      - golangci-lint run  # Optional: requires golangci-lint installation
-
-  # Python tasks
-  build-python:
-    desc: Build Python project
-    cmds:
-      - uv sync
-      - mkdir -p {{.BUILD_DIR}}
-      # Add build steps for Python if needed (e.g., PyInstaller)
-
-  test-python:
-    desc: Run Python tests
-    cmds:
-      - uv run pytest
-
-  test-python-ci:
-    desc: Run Python tests with coverage for CI
-    cmds:
-      - uv run pytest --cov=src --cov-report=xml --cov-report=term
-
-  lint-python:
-    desc: Lint Python code
-    cmds:
-      - uv run ruff check .
-      - uv run ruff format .
-      - uv run mypy .
-
-  # JavaScript/TypeScript tasks
-  build-js:
-    desc: Build JavaScript/TypeScript project
-    cmds:
-      - pnpm install
-      - mkdir -p {{.BUILD_DIR}}
-      - pnpm run build
-
-  test-js:
-    desc: Run JavaScript/TypeScript tests
-    cmds:
-      - pnpm test
-
-  test-js-ci:
-    desc: Run JavaScript/TypeScript tests with coverage for CI
-    cmds:
-      - pnpm test:ci --coverage
-
-  lint-js:
-    desc: Lint JavaScript/TypeScript code
-    cmds:
-      - pnpm run lint
-      - pnpm run format
-      - pnpm run typecheck
+      - golangci-lint run
 
   # Development tasks
   dev:
     desc: Start development server
     cmds:
-      - task: dev-go
-      # - task: dev-python  # Uncomment for Python projects
-      # - task: dev-js      # Uncomment for JS/TS projects
-
-  dev-go:
-    desc: Start Go development server
-    cmds:
-      - go run ./cmd/main.go
-
-  dev-python:
-    desc: Start Python development server
-    cmds:
-      - uv run python src/main.py
-
-  dev-js:
-    desc: Start JavaScript/TypeScript development server
-    cmds:
-      - pnpm run dev
-
-  # Docker tasks (optional)
-  docker-build:
-    desc: Build Docker image
-    cmds:
-      - docker build -t {{.PROJECT_NAME}}:{{.VERSION}} .
-
-  docker-run:
-    desc: Run Docker container
-    cmds:
-      - docker run -p 8080:8080 {{.PROJECT_NAME}}:{{.VERSION}}
-
-# Example project structure this Taskfile supports:
-#
-# Project root/
-# ├── Taskfile.yml (this file)
-# ├── build/          (build artifacts)
-# ├── cmd/            (Go: main applications)
-# │   └── main.go
-# ├── src/            (Python/JS: source code)
-# ├── pkg/            (Go: library code)
-# ├── internal/       (Go: private application code)
-# ├── tests/          (test files)
-# ├── docs/           (documentation)
-# ├── .github/        (GitHub Actions)
-# │   └── workflows/
-# │       └── ci.yml
-# ├── go.mod          (Go projects)
-# ├── pyproject.toml  (Python projects)
-# ├── package.json    (JS/TS projects)
-# ├── Dockerfile      (containerized projects)
-# └── .gitignore
+      - go run ./cmd/irccloud-watcher

@@ -15,8 +15,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gorilla/websocket"
 	"irccloud-watcher/internal/storage"
+	"irccloud-watcher/internal/utils"
+
+	"github.com/gorilla/websocket"
 )
 
 // IRCCloudClient is a client for the IRCCloud API.
@@ -128,9 +130,9 @@ func (c *IRCCloudClient) Connect(email, password string) error {
 				log.Printf("❌ Redirect location: %s", location)
 			}
 			log.Printf("❌ Response headers: %v", resp.Header)
-			body, readErr := io.ReadAll(resp.Body)
+			errorBody, readErr := io.ReadAll(resp.Body)
 			if readErr == nil {
-				log.Printf("❌ WebSocket response body: %s", string(body))
+				log.Printf("❌ WebSocket response body: %s", string(errorBody))
 			}
 		}
 		return fmt.Errorf("could not connect to websocket: %w", err)
@@ -149,7 +151,7 @@ func (c *IRCCloudClient) Close() {
 }
 
 // Run starts the client and listens for messages.
-func (c *IRCCloudClient) Run(channels []string, ignoredChannels []string) {
+func (c *IRCCloudClient) Run(channels, ignoredChannels []string) {
 	// Store filtering parameters in the client
 	c.channels = channels
 	c.ignoredChannels = ignoredChannels
@@ -198,16 +200,18 @@ func (c *IRCCloudClient) Run(channels []string, ignoredChannels []string) {
 
 			// Accept message if not ignored and either no channels specified (accept all) or channel is in allowed list
 			if ircMsg.Type == "buffer_msg" && !c.ignoredChannelSet[ircMsg.Chan] && (len(c.channels) == 0 || c.channelSet[ircMsg.Chan]) {
-				log.Printf("Received message in %s from %s: %s", ircMsg.Chan, ircMsg.From, ircMsg.Msg)
+				cleanedMsg := utils.CleanIRCMessage(ircMsg.Msg)
+				log.Printf("Received message in %s from %s: %s", ircMsg.Chan, ircMsg.From, cleanedMsg)
 
-				msgTime := time.Unix(ircMsg.Time/1000000, (ircMsg.Time%1000000)*1000)
+				msgTime := time.Unix(0, ircMsg.Time*1000)
 
 				dbMsg := &storage.Message{
-					Channel:   ircMsg.Chan,
-					Timestamp: msgTime,
-					Sender:    ircMsg.From,
-					Message:   ircMsg.Msg,
-					Date:      msgTime.Format("2006-01-02"),
+					Channel:      ircMsg.Chan,
+					Timestamp:    msgTime,
+					Sender:       ircMsg.From,
+					Message:      cleanedMsg,
+					Date:         msgTime.Format("2006-01-02"),
+					IRCCloudTime: ircMsg.Time,
 				}
 
 				if err := c.db.InsertMessage(dbMsg); err != nil {
@@ -251,7 +255,7 @@ func (c *IRCCloudClient) authenticate(email, password string) (*AuthResponse, er
 	// Step 1: Get an auth-formtoken
 	log.Println("📡 Step 1: Requesting auth-formtoken...")
 	tokenURL := "https://www.irccloud.com/chat/auth-formtoken"
-	req, err := http.NewRequest("POST", tokenURL, nil)
+	req, err := http.NewRequest("POST", tokenURL, http.NoBody)
 	if err != nil {
 		return nil, fmt.Errorf("could not create token request: %w", err)
 	}
@@ -268,9 +272,9 @@ func (c *IRCCloudClient) authenticate(email, password string) (*AuthResponse, er
 
 	log.Printf("📡 Token request response status: %s", resp.Status)
 	if resp.StatusCode != http.StatusOK {
-		body, readErr := io.ReadAll(resp.Body)
+		errorBody, readErr := io.ReadAll(resp.Body)
 		if readErr == nil {
-			log.Printf("❌ Token request error response body: %s", string(body))
+			log.Printf("❌ Token request error response body: %s", string(errorBody))
 		}
 		return nil, fmt.Errorf("token request failed with status: %s", resp.Status)
 	}
@@ -288,9 +292,9 @@ func (c *IRCCloudClient) authenticate(email, password string) (*AuthResponse, er
 	debugLogResponse(resp, body)
 
 	var tokenResp TokenResponse
-	if err := json.Unmarshal(body, &tokenResp); err != nil {
+	if parseErr := json.Unmarshal(body, &tokenResp); parseErr != nil {
 		log.Printf("❌ Failed to parse token response: %s", string(body))
-		return nil, fmt.Errorf("could not parse token response: %w", err)
+		return nil, fmt.Errorf("could not parse token response: %w", parseErr)
 	}
 
 	log.Printf("✅ Token received successfully: %t, Token length: %d", tokenResp.Success, len(tokenResp.Token))
@@ -325,9 +329,9 @@ func (c *IRCCloudClient) authenticate(email, password string) (*AuthResponse, er
 
 	log.Printf("🔑 Login response status: %s", resp.Status)
 	if resp.StatusCode != http.StatusOK {
-		body, readErr := io.ReadAll(resp.Body)
+		errorBody, readErr := io.ReadAll(resp.Body)
 		if readErr == nil {
-			log.Printf("❌ Login request error response body: %s", string(body))
+			log.Printf("❌ Login request error response body: %s", string(errorBody))
 		}
 		return nil, fmt.Errorf("login failed with status: %s", resp.Status)
 	}
@@ -387,7 +391,7 @@ func (c *IRCCloudClient) processBacklog(backlogURL string) error {
 
 	log.Printf("🔍 Requesting backlog from URL: %s", backlogURL)
 
-	req, err := http.NewRequest("GET", backlogURL, nil)
+	req, err := http.NewRequest("GET", backlogURL, http.NoBody)
 	if err != nil {
 		return fmt.Errorf("could not create backlog request: %w", err)
 	}
@@ -428,23 +432,27 @@ func (c *IRCCloudClient) processBacklog(backlogURL string) error {
 	log.Printf("Processing %d backlog messages", len(backlogMessages))
 
 	for _, ircMsg := range backlogMessages {
-		// Accept message if not ignored and either no channels specified (accept all) or channel is in allowed list
-		if ircMsg.Type == "buffer_msg" && !c.ignoredChannelSet[ircMsg.Chan] && (len(c.channels) == 0 || c.channelSet[ircMsg.Chan]) {
-			log.Printf("Received backlog message in %s from %s: %s", ircMsg.Chan, ircMsg.From, ircMsg.Msg)
+		// Skip message if ignored or not in allowed channels
+		if ircMsg.Type != "buffer_msg" || c.ignoredChannelSet[ircMsg.Chan] || (len(c.channels) > 0 && !c.channelSet[ircMsg.Chan]) {
+			continue
+		}
 
-			msgTime := time.Unix(ircMsg.Time/1000000, (ircMsg.Time%1000000)*1000)
+		cleanedMsg := utils.CleanIRCMessage(ircMsg.Msg)
+		log.Printf("Received backlog message in %s from %s: %s", ircMsg.Chan, ircMsg.From, cleanedMsg)
 
-			dbMsg := &storage.Message{
-				Channel:   ircMsg.Chan,
-				Timestamp: msgTime,
-				Sender:    ircMsg.From,
-				Message:   ircMsg.Msg,
-				Date:      msgTime.Format("2006-01-02"),
-			}
+		msgTime := time.Unix(0, ircMsg.Time*1000)
 
-			if err := c.db.InsertMessage(dbMsg); err != nil {
-				log.Printf("Error inserting backlog message into DB: %v", err)
-			}
+		dbMsg := &storage.Message{
+			Channel:      ircMsg.Chan,
+			Timestamp:    msgTime,
+			Sender:       ircMsg.From,
+			Message:      cleanedMsg,
+			Date:         msgTime.Format("2006-01-02"),
+			IRCCloudTime: ircMsg.Time,
+		}
+
+		if err := c.db.InsertMessage(dbMsg); err != nil {
+			log.Printf("Error inserting backlog message into DB: %v", err)
 		}
 	}
 
@@ -480,7 +488,7 @@ func debugLogResponse(resp *http.Response, body []byte) {
 func isSensitiveHeader(key string) bool {
 	sensitive := []string{"authorization", "cookie", "x-auth-formtoken"}
 	for _, s := range sensitive {
-		if strings.ToLower(key) == s {
+		if strings.EqualFold(key, s) {
 			return true
 		}
 	}

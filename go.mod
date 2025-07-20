@@ -5,6 +5,7 @@ go 1.23.0
 toolchain go1.24.5
 
 require (
+	github.com/alecthomas/kong v1.12.0 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/fsnotify/fsnotify v1.8.0 // indirect
 	github.com/go-viper/mapstructure/v2 v2.2.1 // indirect
