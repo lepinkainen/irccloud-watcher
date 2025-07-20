@@ -109,8 +109,8 @@ func (c *IRCCloudClient) getState() ConnectionState {
 }
 
 // setConnectionConfig sets the connection configuration
-func (c *IRCCloudClient) setConnectionConfig(config *config.ConnectionConfig) {
-	c.connConfig = config
+func (c *IRCCloudClient) setConnectionConfig(cfg *config.ConnectionConfig) {
+	c.connConfig = cfg
 }
 
 // AuthResponse is the response from the IRCCloud authentication endpoint.
@@ -726,9 +726,9 @@ func (c *IRCCloudClient) processBacklog(backlogURL string) error {
 }
 
 // debugLogRequest logs HTTP request details when debug mode is enabled
-func debugLogRequest(method, url string, headers http.Header) {
+func debugLogRequest(method, requestURL string, headers http.Header) {
 	if os.Getenv("IRCCLOUD_DEBUG") == "true" {
-		log.Printf("🔍 %s %s", method, url)
+		log.Printf("🔍 %s %s", method, requestURL)
 		for key, values := range headers {
 			if !isSensitiveHeader(key) {
 				log.Printf("🔍   %s: %s", key, strings.Join(values, ", "))
