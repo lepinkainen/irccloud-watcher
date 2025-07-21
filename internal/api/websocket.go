@@ -81,16 +81,23 @@ type IRCCloudClient struct {
 
 	// Debug mode
 	debugMode bool
+
+	// EID deduplication cache
+	eidCache      map[int64]bool
+	eidCacheMutex sync.RWMutex
+	maxCacheSize  int
 }
 
 // NewIRCCloudClient creates a new IRCCloudClient.
 func NewIRCCloudClient(db *storage.DB) *IRCCloudClient {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &IRCCloudClient{
-		db:         db,
-		state:      StateDisconnected,
-		ctx:        ctx,
-		cancelFunc: cancel,
+		db:           db,
+		state:        StateDisconnected,
+		ctx:          ctx,
+		cancelFunc:   cancel,
+		eidCache:     make(map[int64]bool),
+		maxCacheSize: 10000, // Keep track of last 10k EIDs
 	}
 }
 
@@ -119,6 +126,38 @@ func (c *IRCCloudClient) SetConnectionConfig(cfg *config.ConnectionConfig) {
 // SetDebugMode enables or disables debug mode for printing raw messages
 func (c *IRCCloudClient) SetDebugMode(debug bool) {
 	c.debugMode = debug
+}
+
+// isEIDSeen checks if an EID has been seen before and marks it as seen
+func (c *IRCCloudClient) isEIDSeen(eid int64) bool {
+	c.eidCacheMutex.Lock()
+	defer c.eidCacheMutex.Unlock()
+
+	if c.eidCache[eid] {
+		return true
+	}
+
+	// Add to cache
+	c.eidCache[eid] = true
+
+	// If cache is getting too large, clean it up (simple FIFO-ish cleanup)
+	if len(c.eidCache) > c.maxCacheSize {
+		// Remove roughly 20% of entries to avoid frequent cleanups
+		toRemove := c.maxCacheSize / 5
+		count := 0
+		for k := range c.eidCache {
+			if count >= toRemove {
+				break
+			}
+			delete(c.eidCache, k)
+			count++
+		}
+		if os.Getenv("IRCCLOUD_DEBUG") == "true" {
+			log.Printf("🧹 EID cache cleanup: removed %d entries, %d remaining", toRemove, len(c.eidCache))
+		}
+	}
+
+	return false
 }
 
 // AuthResponse is the response from the IRCCloud authentication endpoint.
@@ -470,6 +509,14 @@ func (c *IRCCloudClient) processMessage(message []byte) error {
 
 	// Accept message if not ignored and either no channels specified (accept all) or channel is in allowed list
 	if ircMsg.Type == "buffer_msg" && !c.ignoredChannelSet[ircMsg.Chan] && (len(c.channels) == 0 || c.channelSet[ircMsg.Chan]) {
+		// Check if we've seen this EID before (skip if duplicate)
+		if c.isEIDSeen(ircMsg.EID) {
+			if os.Getenv("IRCCLOUD_DEBUG") == "true" {
+				log.Printf("🔄 Duplicate message filtered: EID=%d, Channel=%s", ircMsg.EID, ircMsg.Chan)
+			}
+			return nil
+		}
+
 		cleanedMsg := utils.CleanIRCMessage(ircMsg.Msg)
 
 		// Handle timestamp conversion - IRCCloud uses microseconds since Unix epoch
@@ -487,18 +534,18 @@ func (c *IRCCloudClient) processMessage(message []byte) error {
 		}
 
 		if os.Getenv("IRCCLOUD_DEBUG") == "true" {
-			log.Printf("🔍 Processing message: Channel=%s, From=%s, Time=%d, Converted=%s", ircMsg.Chan, ircMsg.From, ircMsg.Time, msgTime.Format(time.RFC3339))
+			log.Printf("🔍 Processing message: Channel=%s, From=%s, EID=%d, Time=%d, Converted=%s", ircMsg.Chan, ircMsg.From, ircMsg.EID, ircMsg.Time, msgTime.Format(time.RFC3339))
 		}
 
 		log.Printf("%s <%s> %s", ircMsg.Chan, ircMsg.From, cleanedMsg)
 
 		dbMsg := &storage.Message{
-			Channel:      ircMsg.Chan,
-			Timestamp:    msgTime,
-			Sender:       ircMsg.From,
-			Message:      cleanedMsg,
-			Date:         msgTime.Format("2006-01-02"),
-			IRCCloudTime: ircMsg.Time,
+			Channel:   ircMsg.Chan,
+			Timestamp: msgTime,
+			Sender:    ircMsg.From,
+			Message:   cleanedMsg,
+			Date:      msgTime.Format("2006-01-02"),
+			EID:       ircMsg.EID,
 		}
 
 		if err := c.db.InsertMessage(dbMsg); err != nil {
@@ -507,7 +554,7 @@ func (c *IRCCloudClient) processMessage(message []byte) error {
 		}
 
 		if os.Getenv("IRCCLOUD_DEBUG") == "true" {
-			log.Printf("✅ Message stored successfully: ID will be auto-generated")
+			log.Printf("✅ Message stored successfully: EID=%d", ircMsg.EID)
 		}
 
 		// Fix: Use EID instead of Time for lastSeenEID tracking
@@ -749,6 +796,14 @@ func (c *IRCCloudClient) processBacklog(backlogURL string) error {
 			continue
 		}
 
+		// Check if we've seen this EID before (skip if duplicate)
+		if c.isEIDSeen(ircMsg.EID) {
+			if os.Getenv("IRCCLOUD_DEBUG") == "true" {
+				log.Printf("🔄 Duplicate backlog message filtered: EID=%d, Channel=%s", ircMsg.EID, ircMsg.Chan)
+			}
+			continue
+		}
+
 		cleanedMsg := utils.CleanIRCMessage(ircMsg.Msg)
 		// Handle timestamp conversion - IRCCloud uses microseconds since Unix epoch
 		// Live messages often have timestamp 0, so we use current time as fallback
@@ -765,24 +820,24 @@ func (c *IRCCloudClient) processBacklog(backlogURL string) error {
 		}
 
 		if os.Getenv("IRCCLOUD_DEBUG") == "true" {
-			log.Printf("🔍 Processing backlog message: Channel=%s, From=%s, Time=%d, Converted=%s", ircMsg.Chan, ircMsg.From, ircMsg.Time, msgTime.Format(time.RFC3339))
+			log.Printf("🔍 Processing backlog message: Channel=%s, From=%s, EID=%d, Time=%d, Converted=%s", ircMsg.Chan, ircMsg.From, ircMsg.EID, ircMsg.Time, msgTime.Format(time.RFC3339))
 		}
 
 		log.Printf("%s <%s> %s", ircMsg.Chan, ircMsg.From, cleanedMsg)
 
 		dbMsg := &storage.Message{
-			Channel:      ircMsg.Chan,
-			Timestamp:    msgTime,
-			Sender:       ircMsg.From,
-			Message:      cleanedMsg,
-			Date:         msgTime.Format("2006-01-02"),
-			IRCCloudTime: ircMsg.Time,
+			Channel:   ircMsg.Chan,
+			Timestamp: msgTime,
+			Sender:    ircMsg.From,
+			Message:   cleanedMsg,
+			Date:      msgTime.Format("2006-01-02"),
+			EID:       ircMsg.EID,
 		}
 
 		if err := c.db.InsertMessage(dbMsg); err != nil {
 			log.Printf("❌ Error inserting backlog message into DB: %v", err)
 		} else if os.Getenv("IRCCLOUD_DEBUG") == "true" {
-			log.Printf("✅ Backlog message stored successfully")
+			log.Printf("✅ Backlog message stored successfully: EID=%d", ircMsg.EID)
 		}
 	}
 

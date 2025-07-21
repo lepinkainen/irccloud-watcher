@@ -504,3 +504,116 @@ func TestDebugMode(t *testing.T) {
 		t.Error("Debug mode should be disabled after SetDebugMode(false)")
 	}
 }
+
+// Test EID duplicate filtering functionality
+func TestEIDDuplicateFiltering(t *testing.T) {
+	// Create a temporary database for testing
+	db, err := storage.NewDB(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to create test database: %v", err)
+	}
+	defer db.Close()
+
+	client := NewIRCCloudClient(db)
+	client.channelSet = map[string]bool{"#test": true}
+
+	// Test that the same EID is considered a duplicate
+	eid := int64(1234567890)
+
+	// First call should return false (not seen before)
+	if client.isEIDSeen(eid) {
+		t.Error("First call to isEIDSeen should return false")
+	}
+
+	// Second call should return true (already seen)
+	if !client.isEIDSeen(eid) {
+		t.Error("Second call to isEIDSeen should return true")
+	}
+
+	// Test different EID should return false
+	if client.isEIDSeen(eid + 1) {
+		t.Error("Different EID should return false")
+	}
+}
+
+// Test EID cache cleanup
+func TestEIDCacheCleanup(t *testing.T) {
+	// Create a temporary database for testing
+	db, err := storage.NewDB(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to create test database: %v", err)
+	}
+	defer db.Close()
+
+	client := NewIRCCloudClient(db)
+	client.maxCacheSize = 10 // Set small cache size for testing
+
+	// Add more than maxCacheSize entries
+	for i := int64(1); i <= 15; i++ {
+		client.isEIDSeen(i)
+	}
+
+	// Cache should have been cleaned up
+	if len(client.eidCache) > client.maxCacheSize {
+		t.Errorf("EID cache size %d should not exceed maxCacheSize %d", len(client.eidCache), client.maxCacheSize)
+	}
+}
+
+// Test message processing with duplicate EIDs
+func TestMessageProcessingWithDuplicateEIDs(t *testing.T) {
+	// Create a temporary database for testing
+	db, err := storage.NewDB(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to create test database: %v", err)
+	}
+	defer db.Close()
+
+	client := NewIRCCloudClient(db)
+	client.channelSet = map[string]bool{"#test": true}
+
+	// First message with EID
+	message1 := `{
+		"type": "buffer_msg",
+		"chan": "#test",
+		"from": "testuser",
+		"msg": "Hello world",
+		"time": 1634567890000000,
+		"eid": 1234567890
+	}`
+
+	// Process first message - should succeed
+	err = client.processMessage([]byte(message1))
+	if err != nil {
+		t.Errorf("Failed to process first message: %v", err)
+	}
+
+	// Same message with same EID - should be filtered as duplicate
+	message2 := `{
+		"type": "buffer_msg",
+		"chan": "#test",
+		"from": "testuser",
+		"msg": "Hello world again",
+		"time": 1634567891000000,
+		"eid": 1234567890
+	}`
+
+	// Process second message - should be filtered out but not error
+	err = client.processMessage([]byte(message2))
+	if err != nil {
+		t.Errorf("Failed to process duplicate message: %v", err)
+	}
+
+	// Check that only one message was stored in database
+	messages, err := db.GetMessagesByDate("2021-10-18")
+	if err != nil {
+		t.Errorf("Failed to retrieve messages: %v", err)
+	}
+
+	if len(messages) != 1 {
+		t.Errorf("Expected 1 message in database, got %d", len(messages))
+	}
+
+	if len(messages) > 0 && messages[0].EID != 1234567890 {
+		t.Errorf("Expected EID 1234567890, got %d", messages[0].EID)
+	}
+}

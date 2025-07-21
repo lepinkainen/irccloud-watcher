@@ -10,13 +10,13 @@ import (
 
 // Message represents a message from an IRC channel.
 type Message struct {
-	ID           int       `db:"id"`
-	Channel      string    `db:"channel"`
-	Timestamp    time.Time `db:"timestamp"`
-	Sender       string    `db:"sender"`
-	Message      string    `db:"message"`
-	Date         string    `db:"date"`
-	IRCCloudTime int64     `db:"irccloud_time"`
+	ID        int       `db:"id"`
+	Channel   string    `db:"channel"`
+	Timestamp time.Time `db:"timestamp"`
+	Sender    string    `db:"sender"`
+	Message   string    `db:"message"`
+	Date      string    `db:"date"`
+	EID       int64     `db:"eid"`
 }
 
 // DB is a wrapper around sqlx.DB for SQLite operations.
@@ -48,32 +48,41 @@ func createSchema(db *sqlx.DB) error {
 		sender TEXT,
 		message TEXT,
 		date DATE NOT NULL,
-		irccloud_time INTEGER
+		eid INTEGER UNIQUE
 	);
 	
-	CREATE INDEX IF NOT EXISTS idx_messages_irccloud_time ON messages(irccloud_time);
 	CREATE INDEX IF NOT EXISTS idx_messages_date ON messages(date);
 	CREATE INDEX IF NOT EXISTS idx_messages_channel ON messages(channel);
+	CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_eid ON messages(eid);
 	`
 	_, err := db.Exec(schema)
-	return err
+	if err != nil {
+		return err
+	}
+
+	// Handle migration for existing databases - add eid column if it doesn't exist
+	migrationSchema := `
+	ALTER TABLE messages ADD COLUMN eid INTEGER;
+	`
+	// This will fail silently if the column already exists, which is expected
+	_, _ = db.Exec(migrationSchema)
+
+	// Create the unique index if it doesn't exist (will fail silently if exists)
+	indexSchema := `
+	CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_eid ON messages(eid);
+	`
+	_, _ = db.Exec(indexSchema)
+
+	return nil
 }
 
 // InsertMessage inserts a new message into the database.
 func (db *DB) InsertMessage(m *Message) error {
-	// Use INSERT OR REPLACE to handle duplicates based on multiple criteria
-	// This ensures we don't get true duplicates while allowing multiple messages with irccloud_time=0
+	// Use INSERT OR IGNORE to handle duplicates based on EID uniqueness
+	// EID is IRCCloud's unique event identifier, so this is the most reliable deduplication
 	query := `
-	INSERT INTO messages (channel, timestamp, sender, message, date, irccloud_time)
-	SELECT :channel, :timestamp, :sender, :message, :date, :irccloud_time
-	WHERE NOT EXISTS (
-		SELECT 1 FROM messages 
-		WHERE channel = :channel 
-		AND sender = :sender 
-		AND message = :message 
-		AND datetime(timestamp) = datetime(:timestamp)
-		AND irccloud_time = :irccloud_time
-	)
+	INSERT OR IGNORE INTO messages (channel, timestamp, sender, message, date, eid)
+	VALUES (:channel, :timestamp, :sender, :message, :date, :eid)
 	`
 	_, err := db.DB.NamedExec(query, m)
 	return err
