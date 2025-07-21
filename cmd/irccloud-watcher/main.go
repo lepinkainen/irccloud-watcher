@@ -18,6 +18,7 @@ import (
 type CLI struct {
 	Config          string `help:"Path to the configuration file" default:"config.yaml"`
 	GenerateSummary bool   `help:"Generate a summary and exit"`
+	Debug           bool   `help:"Print raw received messages to stdout in addition to formatted messages"`
 }
 
 func main() {
@@ -48,6 +49,7 @@ func main() {
 
 	client := api.NewIRCCloudClient(db)
 	client.SetConnectionConfig(&cfg.Connection)
+	client.SetDebugMode(cli.Debug)
 	if connectErr := client.Connect(cfg.Email, cfg.Password); connectErr != nil {
 		log.Fatalf("Failed to connect to IRCCloud: %v", connectErr)
 	}

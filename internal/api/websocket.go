@@ -78,6 +78,9 @@ type IRCCloudClient struct {
 	authResp *AuthResponse
 	email    string
 	password string
+
+	// Debug mode
+	debugMode bool
 }
 
 // NewIRCCloudClient creates a new IRCCloudClient.
@@ -111,6 +114,11 @@ func (c *IRCCloudClient) getState() ConnectionState {
 // SetConnectionConfig sets the connection configuration
 func (c *IRCCloudClient) SetConnectionConfig(cfg *config.ConnectionConfig) {
 	c.connConfig = cfg
+}
+
+// SetDebugMode enables or disables debug mode for printing raw messages
+func (c *IRCCloudClient) SetDebugMode(debug bool) {
+	c.debugMode = debug
 }
 
 // AuthResponse is the response from the IRCCloud authentication endpoint.
@@ -438,6 +446,11 @@ func (c *IRCCloudClient) runMessageLoop() error {
 
 // processMessage handles individual WebSocket messages
 func (c *IRCCloudClient) processMessage(message []byte) error {
+	// Print raw message if debug mode is enabled
+	if c.debugMode {
+		fmt.Printf("RAW: %s\n", string(message))
+	}
+
 	var ircMsg IRCMessage
 	if err := json.Unmarshal(message, &ircMsg); err != nil {
 		return fmt.Errorf("unmarshal error: %w", err)

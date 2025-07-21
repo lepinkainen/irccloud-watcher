@@ -474,3 +474,33 @@ func TestProcessMessage(t *testing.T) {
 		t.Error("Expected error when processing invalid JSON")
 	}
 }
+
+func TestDebugMode(t *testing.T) {
+	// Create in-memory database
+	db, err := storage.NewDB(":memory:")
+	if err != nil {
+		t.Fatalf("Failed to create in-memory database: %v", err)
+	}
+	defer db.Close()
+
+	// Create client
+	client := NewIRCCloudClient(db)
+
+	// Test with debug mode disabled (default)
+	client.SetDebugMode(false)
+	if client.debugMode {
+		t.Error("Debug mode should be disabled by default")
+	}
+
+	// Test enabling debug mode
+	client.SetDebugMode(true)
+	if !client.debugMode {
+		t.Error("Debug mode should be enabled after SetDebugMode(true)")
+	}
+
+	// Test disabling debug mode
+	client.SetDebugMode(false)
+	if client.debugMode {
+		t.Error("Debug mode should be disabled after SetDebugMode(false)")
+	}
+}
