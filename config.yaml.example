@@ -20,3 +20,29 @@ summary_output_path: "/path/to/summary.txt"
 
 # When to generate summaries (cron format: minute hour day month weekday)
 summary_time: "0 6 * * *" # 6 AM daily
+
+# LLM configuration for AI-powered summaries (optional)
+llm:
+  # Provider: ollama, openai, anthropic, gemini
+  provider: "ollama"
+  
+  # Base URL (for Ollama, defaults to http://localhost:11434)
+  base_url: "http://localhost:11434"
+  
+  # Model name (provider-specific defaults are set)
+  model: "llama3.2"
+  
+  # Temperature for generation (0.0-2.0, default: 0.7)
+  temperature: 0.7
+  
+  # Maximum tokens to generate (default: 1000)
+  max_tokens: 1000
+  
+  # API key (not needed for Ollama, can be set via environment variables)
+  # api_key: "your-api-key-here"
+  
+  # Environment variable overrides:
+  # LLM_API_KEY - Generic API key override
+  # OPENAI_API_KEY - OpenAI specific
+  # ANTHROPIC_API_KEY - Anthropic specific  
+  # GEMINI_API_KEY - Google Gemini specific
