@@ -17,17 +17,18 @@ func NewSummaryGenerator() *Generator {
 	return &Generator{}
 }
 
-// GenerateDailySummary generates a summary of messages from the previous day.
+// GenerateDailySummary generates a summary of messages from the last 24 hours.
 func (g *Generator) GenerateDailySummary(db *storage.DB, outputPath string) error {
-	yesterday := time.Now().AddDate(0, 0, -1).Format("2006-01-02")
+	endTime := time.Now()
+	startTime := endTime.Add(-24 * time.Hour)
 
-	messages, err := db.GetMessagesByDate(yesterday)
+	messages, err := db.GetMessagesInTimeRange(startTime, endTime)
 	if err != nil {
-		return fmt.Errorf("could not get messages for date %s: %w", yesterday, err)
+		return fmt.Errorf("could not get messages for time range %s to %s: %w", startTime.Format(time.RFC3339), endTime.Format(time.RFC3339), err)
 	}
 
 	if len(messages) == 0 {
-		fmt.Printf("No messages found for %s\n", yesterday)
+		fmt.Printf("No messages found in the last 24 hours\n")
 		return nil
 	}
 
@@ -38,7 +39,7 @@ func (g *Generator) GenerateDailySummary(db *storage.DB, outputPath string) erro
 		return fmt.Errorf("could not write summary to file %s: %w", outputPath, err)
 	}
 
-	fmt.Printf("Successfully generated summary for %s to %s\n", yesterday, outputPath)
+	fmt.Printf("Successfully generated summary for last 24 hours to %s\n", outputPath)
 	return nil
 }
 
@@ -55,7 +56,7 @@ func formatSummary(messages []storage.Message) string {
 	for channel, msgs := range messagesByChannel {
 		sb.WriteString(fmt.Sprintf("## Summary for %s\n\n", channel))
 		for _, msg := range msgs {
-			sb.WriteString(fmt.Sprintf("[%s] <%s> %s\n", msg.Timestamp.Format("15:04"), msg.Sender, msg.Message))
+			sb.WriteString(fmt.Sprintf("[%s] <%s> %s\n", msg.Timestamp.Format(time.RFC3339), msg.Sender, msg.Message))
 		}
 		sb.WriteString("\n")
 	}

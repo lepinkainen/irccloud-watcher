@@ -102,6 +102,21 @@ func (db *DB) GetMessagesByDate(date string) ([]Message, error) {
 	return messages, err
 }
 
+// GetMessagesInTimeRange retrieves all messages within a time range.
+func (db *DB) GetMessagesInTimeRange(startTime, endTime time.Time) ([]Message, error) {
+	var messages []Message
+	query := `
+	SELECT * FROM messages
+	WHERE timestamp >= ? AND timestamp <= ?
+	ORDER BY timestamp ASC
+	`
+	err := db.DB.Select(&messages, query, startTime, endTime)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	return messages, err
+}
+
 // DeleteMessagesByDate deletes all messages for a given date.
 func (db *DB) DeleteMessagesByDate(date string) error {
 	query := `
