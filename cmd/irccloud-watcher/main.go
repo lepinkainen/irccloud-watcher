@@ -36,7 +36,7 @@ func main() {
 	}
 
 	if cli.GenerateSummary {
-		summaryGenerator := summary.NewSummaryGenerator()
+		summaryGenerator := summary.NewGenerator(cfg)
 		if summaryErr := summaryGenerator.GenerateDailySummary(db, cfg.SummaryOutputPath); summaryErr != nil {
 			db.Close()
 			log.Fatalf("Failed to generate summary: %v", summaryErr)
@@ -57,7 +57,7 @@ func main() {
 
 	c := cron.New()
 	_, err = c.AddFunc(cfg.SummaryTime, func() {
-		summaryGenerator := summary.NewSummaryGenerator()
+		summaryGenerator := summary.NewGenerator(cfg)
 		if cronErr := summaryGenerator.GenerateDailySummary(db, cfg.SummaryOutputPath); cronErr != nil {
 			log.Printf("Failed to generate summary: %v", cronErr)
 		}
